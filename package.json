@@ -1,0 +1,21 @@
+{
+  "name": "fb-bot-panel",
+  "version": "1.0.0",
+  "description": "Facebook bot panel using anuragxarohi-fca",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "anuragxarohi": "latest",
+    "express": "latest",
+    "socket.io": "latest",
+    "fs-extra": "latest",
+    "path": "latest",
+    "http": "latest",
+    "https": "latest",
+    "child_process": "latest",
+    "url": "latest"
+  }
+}
