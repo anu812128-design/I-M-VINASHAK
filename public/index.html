@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anurag Bot Panel</title>
+  <script src="/socket.io/socket.io.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Segoe UI', sans-serif; background: #0f0f0f; color: #eee; padding: 16px; min-height: 100vh; }
+    h1 { text-align: center; color: #f1c40f; font-size: 22px; margin-bottom: 16px; letter-spacing: 1px; }
+    .card { background: #1e1e1e; border: 1px solid #2e2e2e; border-radius: 10px; padding: 16px; margin-bottom: 14px; max-width: 520px; margin-left: auto; margin-right: auto; }
+    .card-title { font-size: 13px; font-weight: bold; color: #f1c40f; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+    input, textarea { width: 100%; padding: 9px 11px; background: #2a2a2a; color: #fff; border: 1px solid #3a3a3a; border-radius: 6px; font-size: 13px; margin-bottom: 8px; outline: none; transition: border 0.2s; }
+    input:focus, textarea:focus { border-color: #f1c40f; }
+    textarea { height: 120px; resize: vertical; font-family: monospace; }
+    .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { flex: 1; min-width: 100px; padding: 10px; border: none; border-radius: 6px; font-size: 13px; font-weight: bold; cursor: pointer; transition: opacity 0.2s; }
+    button:hover { opacity: 0.85; }
+    .btn-start { background: #27ae60; color: #fff; }
+    .btn-stop  { background: #c0392b; color: #fff; }
+    .btn-logs  { background: #2980b9; color: #fff; }
+    .btn-tg    { background: #2196F3; color: #fff; }
+    #log-area { width: 100%; max-width: 520px; margin: 0 auto; height: 220px; background: #000; color: #0f0; padding: 10px; overflow-y: auto; border-radius: 6px; font-family: monospace; font-size: 11px; border: 1px solid #2e2e2e; white-space: pre-wrap; display: block; }
+    #tg-status { font-size: 12px; color: #aaa; margin-top: 6px; }
+    .tg-hint { font-size: 11px; color: #555; margin-top: 8px; padding: 8px 10px; background: #161616; border-radius: 6px; border-left: 2px solid #2196F3; }
+    .tg-hint code { color: #90caf9; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h1>⚡ ANURAG BOT PANEL</h1>
+
+  <!-- Bot Setup -->
+  <div class="card">
+    <div class="card-title">🤖 Bot Setup</div>
+    <input type="text" id="adminUID" placeholder="Admin UID (your Facebook UID)">
+    <textarea id="appstate" placeholder="Paste appstate.json content here..."></textarea>
+    <div class="btn-row">
+      <button class="btn-start" onclick="startBot()">🚀 Start Bot</button>
+      <button class="btn-stop" onclick="stopBot()">🔴 Stop Bot</button>
+      <button class="btn-logs" onclick="refreshLogs()">📜 Refresh Logs</button>
+    </div>
+  </div>
+
+  <!-- Telegram Integration -->
+  <div class="card">
+    <div class="card-title">📱 Telegram Integration</div>
+    <input type="text" id="tgToken" placeholder="Telegram Bot Token (from @BotFather)">
+    <input type="text" id="tgChatId" placeholder="Telegram Chat ID (your chat ID)">
+    <div class="btn-row">
+      <button class="btn-tg" onclick="saveTelegram()">💾 Save Telegram Config</button>
+    </div>
+    <div id="tg-status"></div>
+    <div class="tg-hint">
+      📋 Telegram pe groups: <code>/groups</code><br>
+      📤 Command bhejne ke liye: <code>/@GCODE /command</code>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div style="max-width:520px;margin:0 auto 14px">
+    <div style="font-size:11px;color:#666;margin-bottom:4px;padding-left:2px">📋 LIVE LOGS</div>
+    <div id="log-area">Waiting for bot logs...</div>
+  </div>
+
+  <script>
+    const socket = io();
+    const logArea = document.getElementById('log-area');
+
+    function getUID() { return document.getElementById('adminUID').value.trim(); }
+
+    function appendLog(text) {
+      logArea.innerText += text + '\n';
+      logArea.scrollTop = logArea.scrollHeight;
+    }
+
+    socket.on('botlog', (text) => appendLog(text));
+
+    // ---- Bot Start/Stop ----
+    async function startBot() {
+      const admin = getUID();
+      const appstate = document.getElementById('appstate').value.trim();
+      if (!admin || !appstate) return alert('⚠️ UID and AppState are required!');
+      socket.emit('join', admin);
+      appendLog('⏳ Starting bot...');
+      const res = await fetch('/start-bot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin, appstate })
+      });
+      appendLog(await res.text());
+    }
+
+    async function stopBot() {
+      const admin = getUID();
+      if (!admin) return alert('⚠️ UID is required!');
+      appendLog('⏳ Stopping bot...');
+      const res = await fetch(`/stop-bot?uid=${admin}`);
+      appendLog(await res.text());
+    }
+
+    async function refreshLogs() {
+      const admin = getUID();
+      if (!admin) return alert('⚠️ UID is required!');
+      const res = await fetch(`/logs?uid=${admin}`);
+      logArea.innerText = await res.text();
+      logArea.scrollTop = logArea.scrollHeight;
+    }
+
+    // ---- Telegram ----
+    async function saveTelegram() {
+      const admin = getUID();
+      const token = document.getElementById('tgToken').value.trim();
+      const chatId = document.getElementById('tgChatId').value.trim();
+      if (!admin) return alert('⚠️ Enter Admin UID first!');
+      if (!token || !chatId) return alert('⚠️ Token and Chat ID required!');
+      const status = document.getElementById('tg-status');
+      status.textContent = '⏳ Saving...';
+      const res = await fetch('/save-telegram', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ admin, token, chatId })
+      });
+      const text = await res.text();
+      status.textContent = text;
+      appendLog('📱 Telegram: ' + text);
+    }
+
+    // ---- Auto-load Telegram config when UID entered ----
+    document.getElementById('adminUID').addEventListener('change', async function () {
+      const admin = this.value.trim();
+      if (!admin) return;
+      socket.emit('join', admin);
+      try {
+        const res = await fetch(`/get-telegram?uid=${admin}`);
+        const data = await res.json();
+        if (data.token) document.getElementById('tgToken').value = data.token;
+        if (data.chatId) document.getElementById('tgChatId').value = data.chatId;
+        if (data.token) document.getElementById('tg-status').textContent = '✅ Telegram config loaded';
+      } catch {}
+    });
+  </script>
+</body>
+</html>
