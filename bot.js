@@ -22,7 +22,7 @@ const PHOTOS_DIR = path.join(USER_DIR, "photos");
 const TELEGRAM_PATH = path.join(USER_DIR, "telegram.json");
 const GROUPS_PATH = path.join(USER_DIR, "groups.json");
 
-const BOT_NICKNAME = "ERIIC";
+const BOT_NICKNAME = "😍 फातिमा की गुलाबी बुर 😘";
 
 if (!fs.existsSync(USER_DIR)) {
   console.error("❌ User folder not found:", USER_DIR);
