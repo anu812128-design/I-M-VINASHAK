@@ -3,6 +3,7 @@ import fs from "fs-extra";
 import path from "path";
 import { fork } from "child_process";
 import http from "http";
+import https from "https";
 import { Server } from "socket.io";
 
 const app = express();
@@ -18,6 +19,17 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
 
 const procs = {};
+const intentionalStops = new Set();
+const RESTART_DELAY_MS = Number(process.env.BOT_RESTART_DELAY_MS || 5000);
+const SELF_PING_INTERVAL_MS = Number(process.env.SELF_PING_INTERVAL_MS || 4 * 60 * 1000);
+const SELF_URL = process.env.SELF_URL || process.env.RENDER_EXTERNAL_URL || process.env.RENDER_EXTERNAL_HOSTNAME;
+
+function normalizeSelfUrl(value) {
+  if (!value) return null;
+  const raw = String(value).trim();
+  if (!raw) return null;
+  return raw.startsWith("http://") || raw.startsWith("https://") ? raw : `https://${raw}`;
+}
 
 function appendLog(uid, text) {
   try {
@@ -37,6 +49,9 @@ app.get("/", (req, res) => {
 
 // ---- Bot spawn helper ----
 function startBot(admin) {
+  admin = String(admin);
+  intentionalStops.delete(admin);
+
   if (procs[admin]) {
     try { procs[admin].kill(); } catch {}
     delete procs[admin];
@@ -54,16 +69,21 @@ function startBot(admin) {
   });
   child.on("exit", (code, sig) => {
     delete procs[admin];
-    if (code === 42) {
-      const msg = `🔄 Bot restart ho raha hai...`;
+    if (intentionalStops.has(admin)) {
+      intentionalStops.delete(admin);
+      const msg = `🔴 Bot stopped (code=${code}, sig=${sig})`;
       appendLog(admin, msg);
       io.to(String(admin)).emit("botlog", msg);
-      setTimeout(() => startBot(admin), 2000);
-    } else {
-      const msg = `🔴 Bot exited (code=${code}, sig=${sig})`;
-      appendLog(admin, msg);
-      io.to(String(admin)).emit("botlog", msg);
+      return;
     }
+
+    const delay = code === 42 ? 2000 : RESTART_DELAY_MS;
+    const msg = code === 42
+      ? `🔄 Bot restart ho raha hai...`
+      : `⚠️ Bot exited (code=${code}, sig=${sig}) — auto restart ${Math.round(delay / 1000)}s mein`;
+    appendLog(admin, msg);
+    io.to(String(admin)).emit("botlog", msg);
+    setTimeout(() => startBot(admin), delay);
   });
 
   procs[admin] = child;
@@ -97,12 +117,17 @@ app.get("/stop-bot", (req, res) => {
   if (!uid) return res.status(400).send("❌ uid missing");
   if (!procs[uid]) return res.send("⚠️ Bot not running");
   try {
+    intentionalStops.add(String(uid));
     procs[uid].kill();
     delete procs[uid];
     appendLog(uid, "🔴 Bot stopped by panel");
     io.to(String(uid)).emit("botlog", "🔴 Bot stopped by panel");
     res.send("🔴 stopped");
   } catch (e) { res.status(500).send("❌ Failed: " + e.message); }
+});
+
+app.get(["/health", "/ping"], (req, res) => {
+  res.json({ ok: true, uptime: process.uptime(), bots: Object.keys(procs).length });
 });
 
 // ---- Logs ----
@@ -144,6 +169,38 @@ app.get("/get-telegram", (req, res) => {
   try { res.json(JSON.parse(fs.readFileSync(tf, "utf8"))); } catch { res.json({}); }
 });
 
-server.listen(PORT, "0.0.0.0", () =>
-  console.log(`🚀 ANURAG PANEL running on http://0.0.0.0:${PORT}`)
-);
+function autoStartSavedBots() {
+  try {
+    for (const uid of fs.readdirSync(USERS_DIR)) {
+      const appstatePath = path.join(USERS_DIR, uid, "appstate.json");
+      if (fs.existsSync(appstatePath)) {
+        appendLog(uid, "🚀 Server boot auto-start using saved appstate");
+        startBot(uid);
+      }
+    }
+  } catch (e) {
+    console.error("autoStartSavedBots failed:", e.message);
+  }
+}
+
+function startSelfPing() {
+  const url = normalizeSelfUrl(SELF_URL);
+  if (!url) return console.log("ℹ️ SELF_URL/RENDER_EXTERNAL_URL not set; self-ping disabled");
+  const pingUrl = `${url.replace(/\/$/, "")}/ping`;
+  setInterval(() => {
+    const client = pingUrl.startsWith("https://") ? https : http;
+    client.get(pingUrl, res => res.resume()).on("error", e => console.log("⚠️ self-ping failed:", e.message));
+  }, SELF_PING_INTERVAL_MS).unref();
+  console.log(`💓 Self-ping enabled: ${pingUrl}`);
+}
+
+app.use((req, res) => {
+  if (req.accepts("html")) return res.sendFile(path.join(__dirname, "public", "index.html"));
+  res.status(404).json({ ok: false, error: "Not found" });
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 ANURAG PANEL running on http://0.0.0.0:${PORT}`);
+  autoStartSavedBots();
+  startSelfPing();
+});

@@ -21,6 +21,9 @@ const LOCKS_PATH = path.join(USER_DIR, "locks.json");
 const PHOTOS_DIR = path.join(USER_DIR, "photos");
 const TELEGRAM_PATH = path.join(USER_DIR, "telegram.json");
 const GROUPS_PATH = path.join(USER_DIR, "groups.json");
+const APPSTATE_BACKUP_PATH = path.join(USER_DIR, "appstate.backup.json");
+const LOCK_RECHECK_INTERVAL_MS = Number(process.env.LOCK_RECHECK_INTERVAL_MS || 2 * 60 * 1000);
+const APPSTATE_SAVE_INTERVAL_MS = Number(process.env.APPSTATE_SAVE_INTERVAL_MS || 5 * 60 * 1000);
 
 const BOT_NICKNAME = "😍 फातिमा की गुलाबी बुर 😘";
 
@@ -63,6 +66,23 @@ try {
 
 function saveLocks() {
   try { fs.writeFileSync(LOCKS_PATH, JSON.stringify(locks, null, 2)); } catch (e) { log("❌ Failed saving locks: " + e.message); }
+}
+
+function saveAppState(api) {
+  try {
+    if (!api || typeof api.getAppState !== "function") return false;
+    const latest = api.getAppState();
+    if (!latest) return false;
+    try {
+      if (fs.existsSync(APPSTATE_PATH)) fs.copyFileSync(APPSTATE_PATH, APPSTATE_BACKUP_PATH);
+    } catch {}
+    fs.writeFileSync(APPSTATE_PATH, JSON.stringify(latest, null, 2));
+    appState = latest;
+    return true;
+  } catch (e) {
+    log("⚠️ Failed saving fresh appstate: " + e.message);
+    return false;
+  }
 }
 
 function log(msg) {
@@ -194,6 +214,43 @@ async function revertGroupNameLocked(api, threadID) {
   });
 }
 
+async function recheckAllLocks(api, botUID) {
+  try {
+    const groupNameLocks = Object.entries(locks.groupNames || {});
+    for (const [threadID, lockedName] of groupNameLocks) {
+      try {
+        const info = await api.getThreadInfo(threadID);
+        const current = info?.threadName || info?.name || "";
+        if (lockedName && current && current !== lockedName) {
+          log(`🛡️ Periodic name check: ${threadID} is "${current}"; reverting to "${lockedName}"`);
+          await revertGroupNameLocked(api, threadID);
+        }
+        await sleep(800);
+      } catch (e) { log(`⚠️ Name recheck failed for ${threadID}: ${e.message}`); }
+    }
+
+    for (const [threadID, memberLocks] of Object.entries(locks.nicknames || {})) {
+      try {
+        const info = await api.getThreadInfo(threadID);
+        const currentNicknames = info?.nicknames || info?.nickNames || {};
+        for (const [uid, lockedNick] of Object.entries(memberLocks || {})) {
+          if (!lockedNick) continue;
+          const currentNick = currentNicknames?.[uid] || "";
+          if (currentNick === lockedNick) continue;
+          try {
+            await retryChangeNick(api, threadID, uid, lockedNick, 3);
+            await sleep(500);
+          } catch (e) { log(`⚠️ Nick recheck failed for ${uid} in ${threadID}: ${e.message}`); }
+        }
+      } catch (e) { log(`⚠️ Nick recheck thread info failed for ${threadID}: ${e.message}`); }
+    }
+
+    saveLocks();
+  } catch (e) {
+    log("⚠️ Lock recheck error: " + e.message);
+  }
+}
+
 // ---- Telegram via raw HTTPS (no npm package needed) ----
 function tgPost(token, method, body = {}) {
   return new Promise((resolve) => {
@@ -223,7 +280,7 @@ function tgSend(token, chatId, text) {
 // anuragxarohi's getThreadList is async (returns Promise directly, no callback)
 async function loadAndSaveGroups(api) {
   try {
-    const list = await api.getThreadList(50, null, ["INBOX"]);
+    const list = await api.getThreadList(100, null, ["INBOX"]);
     if (!list || !list.length) return [];
     const groups = list.filter(t => t.isGroup).map(g => ({
       threadID: String(g.threadID),
@@ -379,6 +436,16 @@ async function handleTgCommand(api, threadID, commandText, token, chatId, botUID
   await processCmd(api, threadID, cmd, args, botUID, replyFn);
 }
 
+function runTelegramTask(label, task) {
+  setImmediate(async () => {
+    try {
+      await task();
+    } catch (e) {
+      log(`⚠️ Telegram task failed (${label}): ${e.message}`);
+    }
+  });
+}
+
 // ---- Start Telegram polling ----
 async function startTelegram(token, chatId, api, botUID) {
   log("📱 Starting Telegram bot polling...");
@@ -390,7 +457,7 @@ async function startTelegram(token, chatId, api, botUID) {
       `/help - Show command help\n` +
       `<code>/@CODE /command</code> - Send to group`
     );
-    await sendGroupListToTg(api, token, chatId);
+    runTelegramTask("startup groups", () => sendGroupListToTg(api, token, chatId));
   } catch (e) { log("⚠️ Telegram startup msg failed: " + e.message); }
 
   let offset = 0;
@@ -410,7 +477,8 @@ async function startTelegram(token, chatId, api, botUID) {
           log(`📱 Telegram msg: ${txt}`);
 
           if (txt === "/groups" || txt === "/list") {
-            await sendGroupListToTg(api, token, chatId);
+            await tgSend(token, chatId, "⏳ Groups load ho rahe hain... response yahin aayega.");
+            runTelegramTask("groups", () => sendGroupListToTg(api, token, chatId));
           } else if (txt === "/help") {
             await tgSend(token, chatId,
               `📋 <b>ANURAG BOT COMMANDS</b>\n\n` +
@@ -441,7 +509,8 @@ async function startTelegram(token, chatId, api, botUID) {
               const gcCode = txt.slice(2, spaceIdx).trim();
               const cmd = txt.slice(spaceIdx + 1).trim();
               if (gcCode && cmd) {
-                await handleTgCommand(api, gcCode, cmd, token, chatId, botUID);
+                await tgSend(token, chatId, `⚡ Command received for <code>${gcCode}</code>. Execute ho raha hai, final response yahin aayega.`);
+                runTelegramTask(`/${gcCode}`, () => handleTgCommand(api, gcCode, cmd, token, chatId, botUID));
               } else {
                 await tgSend(token, chatId, "⚠️ Format: /@CODE /command\nExample: /@100123 /groupname on Test");
               }
@@ -452,7 +521,7 @@ async function startTelegram(token, chatId, api, botUID) {
     } catch (e) {
       log("⚠️ Telegram poll error: " + e.message);
     }
-    setTimeout(poll, 2000);
+    setTimeout(poll, 500);
   };
   poll();
 }
@@ -478,6 +547,8 @@ login({ appState }, async (err, api) => {
   if (err) {
     console.error("❌ Login failed:", err?.message || err);
     log("❌ CRITICAL: Login failed - " + (err?.message || JSON.stringify(err)));
+    process.exitCode = 2;
+    setTimeout(() => process.exit(2), 1000);
     return;
   }
 
@@ -488,7 +559,10 @@ login({ appState }, async (err, api) => {
   const botUID = String(api.getCurrentUserID ? api.getCurrentUserID() : ADMIN_ARG);
   log(`🆔 Bot UID: ${botUID} | BOT_NICKNAME: ${BOT_NICKNAME}`);
 
+  saveAppState(api);
   setInterval(saveLocks, 60 * 1000);
+  setInterval(() => saveAppState(api), APPSTATE_SAVE_INTERVAL_MS);
+  setInterval(() => recheckAllLocks(api, botUID), LOCK_RECHECK_INTERVAL_MS);
 
   // Set bot's own nickname to ERIIC in all groups on startup
   setTimeout(async () => {
@@ -515,10 +589,20 @@ login({ appState }, async (err, api) => {
   // ---- MQTT Event listener ----
   api.listenMqtt(async (err, event) => {
     try {
-      if (err) { log("❌ MQTT Error: " + (err?.message || err)); return; }
+      if (err) {
+        const msg = err?.message || String(err);
+        log("❌ MQTT Error: " + msg);
+        if (/Not logged in|login|appstate|cookie|ECONNRESET|closed|disconnect/i.test(msg)) {
+          saveAppState(api);
+          log("🔄 MQTT disconnected/error — supervisor ko restart signal bhej rahe hain");
+          setTimeout(() => process.exit(42), 1000);
+        }
+        return;
+      }
       if (!event) return;
 
       lastEventTime = Date.now();
+      if (Math.random() < 0.03) saveAppState(api);
       const threadID = String(event.threadID || "");
       const senderID = String(event.senderID || "");
       const body = (event.body || "").toString();
